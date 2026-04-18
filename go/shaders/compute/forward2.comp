@@ -1,0 +1,48 @@
+#version 430
+
+// WARNING: Never increase the local_size for a particular dimension
+// more than 64 (or maybe 128?). This can choke the GPU!!
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer Image { float images[]; }; // [nImages][28][28]
+
+layout(std430, binding = 1) readonly buffer W1 { float w1[]; }; // [nNeurons (16*16)][28*28]
+layout(std430, binding = 2) readonly buffer W2 { float w2[]; }; // [nNeurons (8*8)][16*16]
+layout(std430, binding = 3) readonly buffer W3 { float w3[]; }; // [nNeurons (10*10)][8*8]
+
+layout(std430, binding = 4) buffer A1 { float a1[]; };
+layout(std430, binding = 5) buffer A2 { float a2[]; };
+
+layout(std430, binding = 6) writeonly buffer Result { float result[]; };
+
+// layout(std430, binding = 4) buffer B1 { float b1[]; };
+// layout(std430, binding = 5) buffer B2 { float b2[]; };
+// layout(std430, binding = 6) buffer B3 { float b3[]; };
+
+uniform uint batchSize;
+uniform uint batchIdx;
+uniform uint inSize;
+uniform uint outSize;
+
+float relu(float x) {
+    return max(0.0, x);
+}
+
+void main() {
+    uint neuron = gl_GlobalInvocationID.x;
+    uint batchLocal = gl_GlobalInvocationID.y;
+
+    if (neuron >= outSize) return;
+    if (batchLocal >= batchSize) return;
+
+    uint h1Base = batchLocal * h1Size;
+    uint outBase = batchLocal * h2Size;
+
+    float sum = 0.0;
+    for (uint i = 0; i < h1Size; i++) {
+        sum += h1[h1Base + i] * w2[neuron * h1Size + i];
+    }
+    sum += b2[neuron];
+
+    a2[outBase + neuron] = relu(sum);
+}

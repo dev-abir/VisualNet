@@ -1,0 +1,7 @@
+data/
+*.exe
+*.syso
+visualnet
+*.out
+
+.env

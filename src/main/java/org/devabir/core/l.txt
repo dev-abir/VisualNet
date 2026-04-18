@@ -1,0 +1,156 @@
+public class OpenCLPlatformSelector {
+
+    public static class PlatformDevicePair {
+        public final long platformId;
+        public final long deviceId;
+        public PlatformDevicePair(long platformId, long deviceId) {
+            this.platformId = platformId;
+            this.deviceId = deviceId;
+        }
+    }
+
+    public PlatformDevicePair selectFirstGPU() {
+        CL.create();
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            IntBuffer pCount = stack.callocInt(1);
+            int err = CL10.clGetPlatformIDs(null, pCount);
+            if (err != CL10.CL_SUCCESS) throw new IllegalStateException("clGetPlatformIDs count failed: " + err);
+            int numPlatforms = pCount.get(0);
+
+            PointerBuffer platforms = stack.mallocPointer(numPlatforms);
+            err = CL10.clGetPlatformIDs(platforms, (IntBuffer)null);
+            if (err != CL10.CL_SUCCESS) throw new IllegalStateException("clGetPlatformIDs list failed: " + err);
+
+            for (int i = 0; i < numPlatforms; i++) {
+                long platformId = platforms.get(i);
+                // Get platform name (for logging)
+                PointerBuffer sizeBuf = stack.mallocPointer(1);
+                CL10.clGetPlatformInfo(platformId, CL10.CL_PLATFORM_NAME, (ByteBuffer)null, sizeBuf);
+                ByteBuffer nameBuf = stack.malloc((int)sizeBuf.get(0));
+                CL10.clGetPlatformInfo(platformId, CL10.CL_PLATFORM_NAME, nameBuf, null);
+                byte[] nameBytes = new byte[nameBuf.remaining()];
+                nameBuf.get(nameBytes);
+                String name = new String(nameBytes).trim();
+                System.out.println("Platform " + i + " name: " + name);
+
+                // Get GPU devices
+                IntBuffer dCount = stack.mallocInt(1);
+                err = CL10.clGetDeviceIDs(platformId, CL10.CL_DEVICE_TYPE_GPU, null, dCount);
+                if (err != CL10.CL_SUCCESS || dCount.get(0) == 0) {
+                    continue; // no GPU on this platform, try next
+                }
+                PointerBuffer devices = stack.mallocPointer(dCount.get(0));
+                err = CL10.clGetDeviceIDs(platformId, CL10.CL_DEVICE_TYPE_GPU, devices, (IntBuffer)null);
+                if (err != CL10.CL_SUCCESS) continue;
+
+                long deviceId = devices.get(0);
+                return new PlatformDevicePair(platformId, deviceId);
+            }
+
+            throw new IllegalStateException("No GPU device found on any platform");
+        }
+    }
+}
+
+
+
+
+public class GLInteropContextBuilder {
+
+    public PointerBuffer build(long platformId, long glWindowHandle) {
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            String os = System.getProperty("os.name").toLowerCase();
+            if (os.contains("win")) {
+                long hwnd = GLFWNativeWin32.glfwGetWin32Window(glWindowHandle);
+                long hdc = User32.GetDC(hwnd);
+                PointerBuffer props = stack.mallocPointer(7)
+                    .put(CL10.CL_CONTEXT_PLATFORM).put(platformId)
+                    .put(KHRGLSharing.CL_GL_CONTEXT_KHR).put(GLFWNativeWGL.glfwGetWGLContext(glWindowHandle))
+                    .put(KHRGLSharing.CL_WGL_HDC_KHR).put(hdc)
+                    .put(0)
+                    .flip();
+                User32.ReleaseDC(hwnd, hdc);
+                return props;
+            }
+            else if (os.contains("linux")) {
+                PointerBuffer props = stack.mallocPointer(5)
+                    .put(CL10.CL_CONTEXT_PLATFORM).put(platformId)
+                    .put(KHRGLSharing.CL_GL_CONTEXT_KHR).put(GLFWNativeGLX.glfwGetGLXContext(glWindowHandle))
+                    .put(KHRGLSharing.CL_GLX_DISPLAY_KHR).put(GLFWNativeX11.glfwGetX11Display())
+                    .put(0)
+                    .flip();
+                return props;
+            }
+            else {
+                throw new UnsupportedOperationException("Unsupported OS for CL/GL interop: " + os);
+            }
+        }
+    }
+}
+
+
+
+
+public class OpenCLContextManager {
+
+    private long context;
+    private long queue;
+
+    public void createContextAndQueue(PointerBuffer ctxProps, long deviceId) {
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            IntBuffer errcode = stack.callocInt(1);
+            this.context = CL10.clCreateContext(ctxProps, deviceId, null, 0, errcode);
+            if (context == 0L || errcode.get(0) != CL10.CL_SUCCESS) {
+                throw new IllegalStateException("clCreateContext failed: error = " + errcode.get(0));
+            }
+            this.queue = CL10.clCreateCommandQueue(context, deviceId, 0, errcode);
+            if (queue == 0L || errcode.get(0) != CL10.CL_SUCCESS) {
+                throw new IllegalStateException("clCreateCommandQueue failed: error = " + errcode.get(0));
+            }
+            System.out.println("Created CL context and command queue");
+        }
+    }
+
+    public long getContext() { return context; }
+    public long getQueue() { return queue; }
+
+    public void cleanup() {
+        if (queue != 0L) CL10.clReleaseCommandQueue(queue);
+        if (context != 0L) CL10.clReleaseContext(context);
+    }
+}
+
+
+
+
+
+public class OpenCLInitializer {
+
+    private final OpenCLPlatformSelector platformSelector = new OpenCLPlatformSelector();
+    private final GLInteropContextBuilder interopBuilder = new GLInteropContextBuilder();
+    private final OpenCLContextManager contextManager = new OpenCLContextManager();
+
+    public void initialize(long glWindowHandle) {
+        // Step 1: select platform/device
+        OpenCLPlatformSelector.PlatformDevicePair pair = platformSelector.selectFirstGPU();
+
+        // Step 2: build interop context properties
+        PointerBuffer props = interopBuilder.build(pair.platformId, glWindowHandle);
+
+        // Step 3: create context and queue
+        contextManager.createContextAndQueue(props, pair.deviceId);
+
+        System.out.println("OpenCL + OpenGL sharing initialized!");
+    }
+
+    public long getContext() { return contextManager.getContext(); }
+    public long getQueue() { return contextManager.getQueue(); }
+    public void cleanup() { contextManager.cleanup(); }
+}
+
+
+
+
+OpenCLInitializer clInit = new OpenCLInitializer();
+clInit.initialize(glfwManager.getWindowPtr());
+// ... now use clInit.getContext() / getQueue() when you run kernels etc

@@ -1,0 +1,49 @@
+#version 430
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) buffer MNISTData {
+    float mnist[]; // nImages * 28 * 28 floats
+};
+
+layout(std430, binding = 1) buffer WeightSSBO {
+    float weights[];
+};
+
+layout(std430, binding = 2) buffer ActivationSSBO {
+    float activations[];
+};
+
+uniform int inputSize;    // 28 * 28
+uniform int hiddenCount;  // 64 * 64
+uniform int imageIndex;   // which MNIST image
+
+void main() {
+    uint h = gl_GlobalInvocationID.x;
+
+    if (h >= hiddenCount) {
+        // we are doing a glDispatchCompute((int) Math.ceil((64.0 * 64.0) / threadsPerGroup), 1, 1);
+        // this ceil might cause 1 extra thread to be invoked
+        // we are just ignoring that here.
+        return;
+    }
+
+    // The weight array[4096][784] is like:
+    // [weights for hidden 0 (28 * 28 els.),
+    // weights for hidden 1 (784 els.), ...
+    // weights for hidden 254 (784 els.),
+    // weights for hidden 255 (784 els.)]
+
+    // we are advancing h hidden neurons (each has 784 els.)
+    uint base = h * inputSize;
+
+    // calculate z = sum(input * weights)
+    float z = 0.0;
+    for (uint i = 0; i < inputSize; i++) {
+        z += mnist[imageIndex * 28 * 28 + i] * weights[base + i];
+    }
+
+    // TODO: bias?
+    // activation (ReLU)
+    activations[h] = max(z, 0.0);
+}

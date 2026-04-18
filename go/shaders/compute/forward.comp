@@ -1,0 +1,96 @@
+// #version 430 (will be injected by CPU)
+
+// WARNING: Never increase the local_size for a particular dimension
+// more than 64 (or maybe 128?). This can choke the GPU!!
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer Images {
+    float images[]; // [batchSize][nImages][28][28]
+};
+
+layout(std430, binding = 1) readonly buffer W1 {
+    float w1[]; // [nNeurons (16*16)][28*28]
+};
+layout(std430, binding = 2) readonly buffer W2 {
+    float w2[]; // [nNeurons (8*8)][16*16]
+};
+layout(std430, binding = 3) readonly buffer W3 {
+    float w3[]; // [nNeurons (10*10)][8*8]
+};
+
+layout(std430, binding = 4) buffer B1 { float b1[]; };
+layout(std430, binding = 5) buffer B2 { float b2[]; };
+layout(std430, binding = 6) buffer B3 { float b3[]; };
+
+layout(std430, binding = 7) buffer A1 {
+    float a1[]; // [16*16]
+};
+layout(std430, binding = 8) buffer A2 {
+    float a2[]; // [8*8]
+};
+
+layout(std430, binding = 9) writeonly buffer Logits {
+    float logits[]; // [10]
+};
+
+uniform uint batchSize;
+uniform uint batchIdx;
+
+// Layer selection (CPU injects LAYER, IN_SIZE, OUT_SIZE)
+// #define LAYER 1
+// #define IN_SIZE 28 * 28
+// #define OUT_SIZE 16 * 16
+#if LAYER == 1
+    #define INPUT images
+    #define WEIGHTS w1
+    #define BIAS b1
+    #define OUTPUT a1
+#elif LAYER == 2
+    #define INPUT a1
+    #define WEIGHTS w2
+    #define BIAS b2
+    #define OUTPUT a2
+#elif LAYER == 3
+    #define INPUT a2
+    #define WEIGHTS w3
+    #define BIAS b3
+    #define OUTPUT logits
+#endif
+
+#if LAYER == 3
+    // Here, we need the raw logits,
+    // beacuse we'll be applying softmax to output layer
+    #define ACTIVATE(x) (x)
+#else
+    #define ACTIVATE(x) relu(x)
+#endif
+
+float relu(float x) {
+    return max(0.0, x);
+}
+
+void main() {
+    uint neuron = gl_GlobalInvocationID.x;
+    uint batchLocal = gl_GlobalInvocationID.y;
+
+    if (neuron >= OUT_SIZE || batchLocal >= batchSize) {
+        return;
+    }
+
+    #if LAYER == 1
+        uint imageIdx = batchIdx * batchSize + batchLocal;
+        uint inBase = imageIdx * IN_SIZE;
+    #else
+        uint inBase = batchLocal * IN_SIZE;
+    #endif
+
+    uint outBase = batchLocal * OUT_SIZE;
+    uint weightBase = neuron * IN_SIZE;
+
+    float sum = 0.0;
+    for (uint i = 0; i < IN_SIZE; i++) {
+        sum += INPUT[inBase + i] * WEIGHTS[weightBase + i];
+    }
+    sum += BIAS[neuron];
+    OUTPUT[outBase + neuron] = ACTIVATE(sum);
+}

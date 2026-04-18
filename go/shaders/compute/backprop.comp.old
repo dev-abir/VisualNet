@@ -1,0 +1,78 @@
+// #version 430 (will be injected by CPU)
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer Images { float images[]; };
+
+layout(std430, binding = 1) readonly buffer W1 { float w1[]; };
+layout(std430, binding = 2) readonly buffer W2 { float w2[]; };
+layout(std430, binding = 3) readonly buffer W3 { float w3[]; };
+
+layout(std430, binding = 7) readonly buffer A1 { float a1[]; };
+layout(std430, binding = 8) readonly buffer A2 { float a2[]; };
+
+layout(std430, binding = 9) readonly buffer DZ3 { float dZ3[]; }; // Output of softmax
+layout(std430, binding = 13) writeonly buffer DZ2 { float dZ2[]; };
+layout(std430, binding = 14) writeonly buffer DZ1 { float dZ1[]; };
+
+layout(std430, binding = 15) writeonly buffer DW { float dW[]; };
+layout(std430, binding = 16) writeonly buffer DB { float dB[]; };
+
+uniform uint batchSize;
+
+// Layer selection (CPU injects LAYER, IN_SIZE, OUT_SIZE)
+// #define LAYER 2
+// #define IN_SIZE 16 * 16
+// #define OUT_SIZE 28 * 28
+#if LAYER == 1
+    #define INPUT images
+    #define WEIGHTS w1
+    // #define DZ_OUT dZ1
+    #define DZ_IN dZ1
+#elif LAYER == 2
+    #define INPUT a1
+    #define WEIGHTS w2
+    #define DZ_OUT dZ1
+    #define DZ_IN dZ2
+#elif LAYER == 3
+    #define INPUT a2
+    #define WEIGHTS w3
+    #define DZ_OUT dZ2
+    #define DZ_IN dZ3
+#endif
+
+// ReLU derivative
+float dRelu(float x) {
+    return x > 0.0 ? 1.0 : 0.0;
+}
+
+void main() {
+    uint neuron = gl_GlobalInvocationID.x;
+    uint batchLocal = gl_GlobalInvocationID.y;
+
+    if (neuron >= OUT_SIZE || batchLocal >= batchSize) return;
+
+    uint inBase = batchLocal * IN_SIZE;
+    uint outBase = batchLocal * OUT_SIZE;
+    uint weightBase = neuron * IN_SIZE;
+
+    float dz = DZ_IN[outBase + neuron];
+
+    // weight gradient
+    for (uint i = 0; i < IN_SIZE; i++) {
+        // dW[weightBase + i] += dz * INPUT[inBase + i];
+        atomicAdd(dW[weightBase + i], dz * INPUT[inBase + i]);
+    }
+
+    // bias gradient
+    atomicAdd(dB[neuron], dz);
+
+    // propagate gradient backward
+#if LAYER > 1
+    for (uint i = 0; i < IN_SIZE; i++) {
+        // NOTE: Using A instead of Z in INPUT is valid ONLY for ReLU
+        atomicAdd(DZ_OUT[inBase + i], dz * WEIGHTS[weightBase + i] * dRelu(INPUT[inBase + i]));
+        // DZ_OUT[inBase + i] += dz * WEIGHTS[weightBase + i] * dRelu(INPUT[inBase + i]);
+    }
+#endif
+}

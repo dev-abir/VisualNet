@@ -1,0 +1,136 @@
+#version 430
+
+layout(local_size_x = 1, local_size_y = 1) in;
+
+layout(std430, binding = 0) buffer MNISTData {
+    float mnist[]; // nImages * 28 * 28 floats
+};
+
+layout(std430, binding = 1) buffer WeightSSBO {
+    float weight[];
+};
+
+layout(std430, binding = 3) buffer RenderSSBO {
+    float edgeData[];
+};
+
+uniform int imageIndex;     // which MNIST image
+
+// map input 28x28 → 7x7 (average)
+float pooledInput(uint inputPolledX, uint inputPolledY) {
+    float sum = 0.0;
+
+    uint imageBase = imageIndex * 28 * 28;
+
+    for (uint y = 0; y < 4; y++) {
+        for (uint x = 0; x < 4; x++) {
+            uint imageX = inputPolledX * 4 + x;
+            uint imageY = inputPolledY * 4 + y;
+
+            // The MNIST SSBO contains muliple images.
+            //   imageBase = imageIndex * 28 * 28
+            //   - imageBase jumps to the correct image (stride 784)
+            //   - imageY * 28 moves down each row in the 28x28 single image
+            //   - weightX moves along columns in that row
+
+            sum += mnist[imageBase + imageY * 28 + imageX];
+        }
+    }
+
+    // return average
+    return sum / 16.0;
+}
+
+// Pool weights from 28x28 → 7x7 (average)
+float pooledWeight(uint hiddenPooledIdx, uint pooledX, uint pooledY) {
+    float sum = 0.0;
+
+    // Suppose we are pooling a 4x4 block starting at top-left of the neuron:
+    // The weight array is like weights[4096][784] { neuron0[784], neuron1[784]... }
+    // If I just pick one neuron and put them in the input image format, then
+    // The memory layout of 28x28 weights (flattened row-major) becomes:
+    //
+    // row 0: w00 w01 w02 w03 w04 ... w27
+    // row 1: w28 w29 w30 w31 w32 ... w55
+    // row 2: w56 w57 w58 w59 ...
+    // row 3: ...
+    // ...
+    //
+    // Pooling 4x4 block:
+    //
+    //   Selected weights:
+    //   row 0: w00 w01 w02 w03
+    //   row 1: w28 w29 w30 w31
+    //   row 2: w56 w57 w58 w59
+    //   row 3: w84 w85 w86 w87
+    //
+    // Calculation in code:
+    //   weightIdx = hiddenBase + weightY * 28 + weightX
+    //   - hiddenBase jumps to the correct neuron (stride 784)
+    //   - weightY*28 moves down each row in the 28x28 weight image
+    //   - weightX moves along columns in that row
+
+    uint hiddenBase = hiddenPooledIdx * 28 * 28;
+
+    for (uint y = 0; y < 4; y++) {
+        for (uint x = 0; x < 4; x++) {
+
+            uint weightX = pooledX * 4 + x;
+            uint weightY = pooledY * 4 + y;
+
+            uint weightIdx = hiddenBase + weightY * 28 + weightX;
+            sum += weight[weightIdx];
+        }
+    }
+
+    // average of 16 weights
+    return sum / 16.0;
+}
+
+//// map hidden 64x64 → 16x16 (average)
+//uint pooledHiddenIndex(uint hiddenPolledX, uint hiddenPolledY) {
+//    float sum = 0.0;
+//    for (uint y = 0; y < 4; y++) {
+//        for (uint x = 0; x < 4; x++) {
+//            uint hiddenX = inputPolledX * 4 + x;
+//            uint hiddenY = inputPolledY * 4 + y;
+//            sum += mnist[(imageIndex * 28 * 28) + hiddenY * 28 + hiddenX];
+//        }
+//    }
+//
+//    // return average
+//    return sum / 16.0;
+//
+//    // return (hiddenPolledY * 4) * 64 + (hiddenPolledX * 4);
+//}
+
+void main() {
+    uint inputPolledIdx = gl_GlobalInvocationID.x;  // 0..48
+    uint hiddenPolledIdx = gl_GlobalInvocationID.y; // 0..255
+
+    uint inputPolledX = inputPolledIdx % 7;
+    uint inputPolledY = inputPolledIdx / 7;
+
+    uint hiddenPolledX = hiddenPolledIdx % 16;
+    uint hiddenPolledY = hiddenPolledIdx / 16;
+
+    float inputVal = pooledInput(inputPolledX, inputPolledY);
+    float weightVal = pooledWeight(hiddenPolledIdx, hiddenPolledX, hiddenPolledY);
+
+//    float contribution = inputVal * weightVal;
+    float strength = inputVal * weightVal;
+    edgeData[hiddenPolledIdx * 49 + inputPolledIdx] = strength;
+
+//    uint hiddenBase = pooledHiddenIndex(hiddenPolledX, hiddenPolledY) * inputSize;
+//    uint inputIdx = (inputPolledY * 4) * 28 + (inputPolledX * 4);
+//
+//    float w = weight[hiddenBase + inputIdx];
+
+//    uint idx = hiddenPolledIdx * 49 + inputIdx;
+//
+//    edgeData[idx * 2 + 0] = vec4(
+//        vec2(inputPolledX, inputPolledY) / 7.0,
+//        vec2(hiddenPolledX, hiddenPolledY) / 16.0
+//    );
+//    edgeData[idx * 2 + 1] = vec4(strength, 0, 0, 0);
+}

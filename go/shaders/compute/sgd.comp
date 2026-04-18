@@ -1,0 +1,53 @@
+// #version 430 (will be injected by CPU)
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 1) buffer W1 { float w1[]; };
+layout(std430, binding = 2) buffer W2 { float w2[]; };
+layout(std430, binding = 3) buffer W3 { float w3[]; };
+
+layout(std430, binding = 4) buffer B1 { float b1[]; };
+layout(std430, binding = 5) buffer B2 { float b2[]; };
+layout(std430, binding = 6) buffer B3 { float b3[]; };
+
+layout(std430, binding = 6) readonly buffer DW1 { float dW1[]; };
+layout(std430, binding = 7) readonly buffer DW2 { float dW2[]; };
+layout(std430, binding = 8) readonly buffer DW3 { float dW3[]; };
+layout(std430, binding = 9) readonly buffer DB1 { float dB1[]; };
+layout(std430, binding = 10) readonly buffer DB2 { float dB2[]; };
+layout(std430, binding = 11) readonly buffer DB3 { float dB3[]; };
+
+uniform float learningRate;
+
+// Layer selection (CPU injects LAYER, WEIGHT_SIZE, BIAS_SIZE)
+// #define LAYER 1
+// #define WEIGHT_SIZE 16 * 16 * 8 * 8
+// #define BIAS_SIZE 16 * 16
+#if LAYER == 1
+    #define WEIGHTS w1
+    #define BIAS b1
+    #define dWEIGHTS dW1
+    #define dBIAS dB1
+#elif LAYER == 2
+    #define WEIGHTS w2
+    #define BIAS b2
+    #define dWEIGHTS dW2
+    #define dBIAS dB2
+#elif LAYER == 3
+    #define WEIGHTS w3
+    #define BIAS b3
+    #define dWEIGHTS dW3
+    #define dBIAS dB3
+#endif
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    // Update weights
+    if (idx < WEIGHT_SIZE)
+        WEIGHTS[idx] -= learningRate * dWEIGHTS[idx];
+
+    // Update biases
+    if (idx < BIAS_SIZE)
+        BIAS[idx] -= learningRate * dBIAS[idx];
+}

@@ -1,0 +1,234 @@
+#version 430
+
+// WARNING: Never increase the local_size for a particular dimension
+// more than 64 (or maybe 128?). This can choke the GPU!!
+layout(local_size_x = 64) in;
+
+// layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, binding = 0) readonly buffer Image {
+    float images[]; // [nImages][28][28]
+};
+
+layout(std430, binding = 1) readonly buffer W1 {
+    float w1[]; // [nNeurons (16*16)][28*28]
+};
+layout(std430, binding = 2) readonly buffer W2 {
+    float w2[]; // [nNeurons (8*8)][16*16]
+};
+layout(std430, binding = 3) readonly buffer W3 {
+    float w3[]; // [nNeurons (10*10)][8*8]
+};
+
+layout(std430, binding = 4) buffer H1 {
+    float h1[];
+};
+layout(std430, binding = 5) buffer H2 {
+    float h2[];
+};
+layout(std430, binding = 6) writeonly buffer Result {
+    float result[];
+};
+
+layout(std430, binding = 4) buffer B1 { float b1[]; };
+layout(std430, binding = 5) buffer B2 { float b2[]; };
+layout(std430, binding = 6) buffer B3 { float b3[]; };
+
+layout(std430, binding = 10) readonly buffer Target { float target[]; };   // one-hot labels
+
+layout(std430, binding = 11) buffer D1 { float d1[]; };
+layout(std430, binding = 12) buffer D2 { float d2[]; };
+layout(std430, binding = 13) buffer D3 { float d3[]; };
+
+// 0=forward1, 1=forward2, 2=forward3, 3=backward
+uniform int stage;
+uniform int batchSize;
+uniform int batchIdx;
+uniform float learningRate;
+
+// Sizes
+const int imageSize = 28*28;
+const int h1Size = 16*16;
+const int h2Size = 8*8;
+const int outSize = 10;
+
+float relu(float x) { return max(0.0, x); }
+float relu_deriv(float x) { return x > 0.0 ? 1.0 : 0.0; }
+
+// ------------------------
+// Forward Pass Functions
+// ------------------------
+void forward1() {
+    uint neuron = gl_GlobalInvocationID.x;
+    uint batchLocal = gl_GlobalInvocationID.y;
+    if (neuron >= h1Size || batchLocal >= batchSize) return;
+
+    uint imageIdx = batchIdx + batchLocal;
+    uint inBase = imageIdx * imageSize;
+    uint outBase = batchLocal * h1Size;
+
+    float sum = b1[neuron];
+    for (uint i = 0; i < imageSize; i++)
+        sum += images[inBase + i] * w1[neuron * imageSize + i];
+
+    h1[outBase + neuron] = relu(sum);
+}
+
+void forward2() {
+    uint neuron = gl_GlobalInvocationID.x;
+    uint batchLocal = gl_GlobalInvocationID.y;
+    if (neuron >= h2Size || batchLocal >= batchSize) return;
+
+    uint h1Base = batchLocal * h1Size;
+    uint outBase = batchLocal * h2Size;
+
+    float sum = b2[neuron];
+    for (uint i = 0; i < h1Size; i++)
+        sum += h1[h1Base + i] * w2[neuron * h1Size + i];
+
+    h2[outBase + neuron] = relu(sum);
+}
+
+void forward3() {
+    uint neuron = gl_GlobalInvocationID.x;
+    uint batchLocal = gl_GlobalInvocationID.y;
+    if (neuron >= outSize || batchLocal >= batchSize) return;
+
+    uint h2Base = batchLocal * h2Size;
+    uint outBase = batchLocal * outSize;
+
+    float sum = b3[neuron];
+    for (uint i = 0; i < h2Size; i++)
+        sum += h2[h2Base + i] * w3[neuron * h2Size + i];
+
+    result[outBase + neuron] = sum; // raw logits
+}
+
+// Softmax per batch element
+void softmax(uint batchLocal) {
+    uint outBase = batchLocal * outSize;
+
+    // 1️⃣ Max for numerical stability
+    float maxVal = result[outBase];
+    for (uint i = 1; i < outSize; i++)
+        maxVal = max(maxVal, result[outBase + i]);
+
+    // 2️⃣ Exponentiate and sum
+    float sumExp = 0.0;
+    for (uint i = 0; i < outSize; i++) {
+        result[outBase + i] = exp(result[outBase + i] - maxVal);
+        sumExp += result[outBase + i];
+    }
+
+    // 3️⃣ Normalize
+    for (uint i = 0; i < outSize; i++)
+        result[outBase + i] /= sumExp;
+}
+
+// ------------------------
+// Backward Pass Functions
+// ------------------------
+void backward3() {
+    uint neuron = gl_GlobalInvocationID.x;
+    uint batchLocal = gl_GlobalInvocationID.y;
+    if (neuron >= outSize || batchLocal >= batchSize) return;
+
+    uint outBase = batchLocal * outSize;
+    float t = target[outBase + neuron];
+    d3[outBase + neuron] = result[outBase + neuron] - t;
+}
+
+void backward2() {
+    uint neuron = gl_GlobalInvocationID.x;
+    uint batchLocal = gl_GlobalInvocationID.y;
+    if (neuron >= h2Size || batchLocal >= batchSize) return;
+
+    uint h2Base = batchLocal * h2Size;
+    float sum = 0.0;
+    for (uint i = 0; i < outSize; i++)
+        sum += d3[batchLocal * outSize + i] * w3[i * h2Size + neuron];
+
+    d2[h2Base + neuron] = sum * relu_deriv(h2[h2Base + neuron]);
+}
+
+void backward1() {
+    uint neuron = gl_GlobalInvocationID.x;
+    uint batchLocal = gl_GlobalInvocationID.y;
+    if (neuron >= h1Size || batchLocal >= batchSize) return;
+
+    uint h1Base = batchLocal * h1Size;
+    float sum = 0.0;
+    for (uint i = 0; i < h2Size; i++)
+        sum += d2[batchLocal * h2Size + i] * w2[i * h1Size + neuron];
+
+    d1[h1Base + neuron] = sum * relu_deriv(h1[h1Base + neuron]);
+}
+
+// ------------------------
+// SGD Weight Updates
+// ------------------------
+void sgd_update() {
+    uint neuron = gl_GlobalInvocationID.x;
+    uint inputIdx = gl_GlobalInvocationID.y;
+
+    // --- W3 / B3 ---
+    if (neuron < outSize && inputIdx < h2Size) {
+        for (uint b = 0; b < batchSize; b++) {
+            uint h2Base = b * h2Size;
+            uint outBase = b * outSize;
+            w3[neuron * h2Size + inputIdx] -= learningRate * d3[outBase + neuron] * h2[h2Base + inputIdx];
+        }
+    }
+
+    if (neuron < outSize) {
+        for (uint b = 0; b < batchSize; b++)
+            b3[neuron] -= learningRate * d3[b * outSize + neuron];
+    }
+
+    // --- W2 / B2 ---
+    if (neuron < h2Size && inputIdx < h1Size) {
+        for (uint b = 0; b < batchSize; b++) {
+            uint h1Base = b * h1Size;
+            uint h2Base = b * h2Size;
+            w2[neuron * h1Size + inputIdx] -= learningRate * d2[h2Base + neuron] * h1[h1Base + inputIdx];
+        }
+    }
+
+    if (neuron < h2Size) {
+        for (uint b = 0; b < batchSize; b++)
+            b2[neuron] -= learningRate * d2[b * h2Size + neuron];
+    }
+
+    // --- W1 / B1 ---
+    if (neuron < h1Size && inputIdx < imageSize) {
+        for (uint b = 0; b < batchSize; b++) {
+            uint h1Base = b * h1Size;
+            uint inBase = b * imageSize;
+            w1[neuron * imageSize + inputIdx] -= learningRate * d1[h1Base + neuron] * images[inBase + inputIdx];
+        }
+    }
+
+    if (neuron < h1Size) {
+        for (uint b = 0; b < batchSize; b++)
+            b1[neuron] -= learningRate * d1[b * h1Size + neuron];
+    }
+}
+
+// ------------------------
+// Main
+// ------------------------
+void main() {
+    if (stage == 0) forward1();
+    else if (stage == 1) forward2();
+    else if (stage == 2) {
+        forward3();
+        uint batchLocal = gl_GlobalInvocationID.y;
+        if (batchLocal < batchSize) softmax(batchLocal);
+    }
+    else if (stage == 3) {
+        backward3();
+        backward2();
+        backward1();
+        sgd_update();
+    }
+}

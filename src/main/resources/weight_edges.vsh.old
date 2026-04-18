@@ -1,0 +1,109 @@
+#version 430
+
+// layout(std430, binding = 3) buffer RenderSSBO {
+//     vec2 src[];
+//     vec2 dst[];
+//     float w[];
+// };
+
+layout(std430, binding = 3) buffer RenderSSBO {
+    float edgeStrength[]; // shape = [256][49]
+};
+
+uniform float time;
+uniform mat4 model;
+uniform mat4 projection;
+uniform mat4 view;
+
+const vec2 quad[4] = vec2[](
+    vec2(-0.5, -0.5),
+    vec2( 0.5, -0.5),
+    vec2(-0.5,  0.5),
+    vec2( 0.5,  0.5)
+);
+
+out float vStrength;
+out float vT;
+
+void main() {
+    // gl_InstanceID = 0 .. (49*256)-1
+    uint id = gl_InstanceID;
+    // gl_VertexID = 0 .. 3
+    uint vertId = gl_VertexID;
+
+    uint pooledInputIdx  = id % 49;
+    uint pooledHiddenIdx = id / 49;
+
+    // positions in normalized space (0..1)
+    vec2 srcPos = vec2(pooledInputIdx % 7, pooledInputIdx / 7) / 7.0;
+    vec2 dstPos = vec2(pooledHiddenIdx % 16, pooledHiddenIdx / 16) / 16.0;
+
+    float strength = edgeStrength[id];
+
+    float zInput  = -0.5;
+    float zHidden =  0.5;
+    vec3 A = vec3(srcPos * 2.0 - 1.0, zInput);
+    vec3 B = vec3(dstPos * 2.0 - 1.0, zHidden);
+
+    // compute normalized direction and perpendicular
+//    vec2 dir  = dstPos - srcPos;
+//    vec2 perp = normalize(vec2(-dir.y, dir.x));
+    vec3 dir = normalize(B - A);
+    vec3 normal = normalize(cross(dir, vec3(0, 0, 1)));
+
+    float thickness = strength;
+
+    // quad local coordinates
+    vec2 q = quad[vertId];
+
+    // how far along the edge the vertex is, 0=start, 1=end
+    float t = q.x + 0.5;
+
+//    vec2 pos = mix(srcPos, dstPos, t) + perp * q.y * thickness;
+    vec3 pos =
+    A +
+    dir * (q.x + 0.5) * length(B - A) +
+    normal * q.y * thickness;
+
+    // simple flowing animation
+    float flow = fract(time * 0.5 + q.x);
+    pos += dir * flow * 0.05;
+
+    gl_Position = model * vec4(pos, 1.0);
+    // gl_Position = projection * view * vec4(pos, 0.0, 1.0);
+
+    // pass to fragment shader
+    vT        = t;
+    vStrength = edgeStrength[id];
+
+
+// oolldd stuff
+
+//    vec2 a = src[id];
+//    vec2 b = dst[id];
+//
+//    // map to world space
+//    vec2 A = a * 2.0 - 1.0;
+//    vec2 B = b * 2.0 - 1.0;
+//
+//    vec2 dir = normalize(B - A);
+//    vec2 normal = vec2(-dir.y, dir.x);
+//
+//    float len = length(B - A);
+//    float thickness = 0.002 + w[id] * 0.01;
+//
+//    vec2 q = quad[gl_VertexID];
+//    vec2 pos =
+//        A +
+//        dir * (q.x + 0.5) * len +
+//        normal * q.y * thickness;
+//
+//    // simple flowing animation
+//    float flow = fract(time * 0.5 + q.x);
+//    pos += dir * flow * 0.01;
+//
+//    gl_Position = viewProj * vec4(pos, 0.0, 1.0);
+//
+//    vStrength = w[id];
+//    vT = q.x + 0.5;
+}

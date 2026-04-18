@@ -1,0 +1,122 @@
+// #version 430 (will be injected by CPU)
+
+#define LOCAL_SIZE 64
+layout(local_size_x = LOCAL_SIZE) in;
+
+layout(std430, binding = 0) readonly buffer Images { float images[]; };
+
+layout(std430, binding = 1) readonly buffer W1 { float w1[]; };
+layout(std430, binding = 2) readonly buffer W2 { float w2[]; };
+layout(std430, binding = 3) readonly buffer W3 { float w3[]; };
+
+layout(std430, binding = 7) readonly buffer A1 { float a1[]; };
+layout(std430, binding = 8) readonly buffer A2 { float a2[]; };
+
+layout(std430, binding = 9) readonly buffer DZ3 { float dZ3[]; }; // Output of softmax
+layout(std430, binding = 13) buffer DZ2 { float dZ2[]; };
+layout(std430, binding = 14) buffer DZ1 { float dZ1[]; };
+
+layout(std430, binding = 15) writeonly buffer DW { float dW[]; };
+layout(std430, binding = 16) writeonly buffer DB { float dB[]; };
+
+uniform uint batchSize;
+
+// Layer selection (CPU injects LAYER, IN_SIZE, OUT_SIZE)
+// #define LAYER 2
+// #define IN_SIZE 16 * 16
+// #define OUT_SIZE 28 * 28
+#if LAYER == 1
+    #define INPUT images
+    #define WEIGHTS w1
+    // #define DZ_OUT dZ1
+    #define DZ_IN dZ1
+#elif LAYER == 2
+    #define INPUT a1
+    #define WEIGHTS w2
+    #define DZ_OUT dZ1
+    #define DZ_IN dZ2
+#elif LAYER == 3
+    #define INPUT a2
+    #define WEIGHTS w3
+    #define DZ_OUT dZ2
+    #define DZ_IN dZ3
+#endif
+
+shared float sReduce[LOCAL_SIZE];
+
+// ReLU derivative
+float dRelu(float x) {
+    return x > 0.0 ? 1.0 : 0.0;
+}
+
+void main() {
+    uint neuron = gl_WorkGroupID.x; // 0..layerSize
+    uint lid = gl_LocalInvocationID.x; // 0..64 (this is not the batch size)
+
+    if (neuron >= OUT_SIZE)
+        return;
+
+    /* --------------------
+       Bias gradient dB
+       -------------------- */
+    float biasSum = 0.0;
+
+    for (uint batch = lid; batch < batchSize; batch += LOCAL_SIZE) {
+        biasSum += DZ_IN[batch * OUT_SIZE + neuron];
+    }
+
+    sReduce[lid] = biasSum;
+    barrier();
+
+    for (uint stride = LOCAL_SIZE >> 1; stride > 0; stride >>= 1) {
+        if (lid < stride)
+            sReduce[lid] += sReduce[lid + stride];
+        barrier();
+    }
+
+    if (lid == 0)
+        dB[neuron] = sReduce[0];
+
+    /* --------------------
+       Weight gradients dW
+       -------------------- */
+    uint wBase = neuron * IN_SIZE;
+
+    for (uint i = 0; i < IN_SIZE; ++i) {
+        float sum = 0.0;
+
+        for (uint batch = lid; batch < batchSize; batch += LOCAL_SIZE) {
+            sum += DZ_IN[batch * OUT_SIZE + neuron]
+                 * INPUT[batch * IN_SIZE + i];
+        }
+
+        sReduce[lid] = sum;
+        barrier();
+
+        for (uint stride = LOCAL_SIZE >> 1; stride > 0; stride >>= 1) {
+            if (lid < stride)
+                sReduce[lid] += sReduce[lid + stride];
+            barrier();
+        }
+
+        if (lid == 0)
+            dW[wBase + i] = sReduce[0];
+    }
+
+    /* --------------------
+       Backpropagate dZ
+       (skip for first layer)
+       -------------------- */
+#if LAYER > 1
+    for (uint batch = lid; batch < batchSize; batch += LOCAL_SIZE) {
+        float dz = DZ_IN[batch * OUT_SIZE + neuron];
+        uint inBase = batch * IN_SIZE;
+
+        for (uint i = 0; i < IN_SIZE; ++i) {
+            DZ_OUT[inBase + i] +=
+                dz * WEIGHTS[wBase + i]
+                * dRelu(INPUT[inBase + i]);
+        }
+    }
+#endif
+}

@@ -1,0 +1,304 @@
+
+/*
+
+    // Network dimensions
+    static final int INPUT = 28 * 28;     // MNIST image flattened
+    static final int H1 = 32 * 32;         // Hidden layer 1
+    static final int H2 = 32 * 32;         // Hidden layer 2
+    static final int OUTPUT = 10;          // Classes 0–9
+
+    // Weights
+    static double[][] W1 = new double[INPUT][H1];
+    static double[][] W2 = new double[H1][H2];
+    static double[][] W3 = new double[H2][OUTPUT];
+
+    // Biases
+    static double[] b1 = new double[H1];
+    static double[] b2 = new double[H2];
+    static double[] b3 = new double[OUTPUT];
+
+    static Random rnd = new Random();
+
+    // Initialize weights with small random values
+    static void init() {
+        init(W1);
+        init(W2);
+        init(W3);
+    }
+
+    static void init(double[][] w) {
+        for (int i = 0; i < w.length; i++)
+            for (int j = 0; j < w[0].length; j++)
+                w[i][j] = rnd.nextGaussian() * 0.01;
+    }
+
+    // ReLU activation
+    static double relu(double x) {
+        return Math.max(0, x);
+    }
+
+    // Gradient of ReLU
+    static double reluGrad(double x) {
+        return x > 0 ? 1.0 : 0.0;
+    }
+
+    // Softmax for output layer
+    static double[] softmax(double[] z) {
+        double max = Double.NEGATIVE_INFINITY;
+        for (double v : z) max = Math.max(max, v);
+
+        double sum = 0;
+        double[] out = new double[z.length];
+        for (int i = 0; i < z.length; i++) {
+            out[i] = Math.exp(z[i] - max);
+            sum += out[i];
+        }
+        for (int i = 0; i < z.length; i++)
+            out[i] /= sum;
+
+        return out;
+    }
+
+    // Cross-entropy loss (label is class index)
+    static double crossEntropy(double[] probs, int label) {
+        return -Math.log(probs[label] + 1e-9);
+    }
+
+    // Single-sample training step (SGD)
+    static void train(double[] x, int label, double lr) {
+
+        // -------- Forward pass --------
+
+        // Layer 1
+        double[] z1 = new double[H1];
+        double[] a1 = new double[H1];
+        for (int j = 0; j < H1; j++) {
+            for (int i = 0; i < INPUT; i++)
+                z1[j] += x[i] * W1[i][j];
+            z1[j] += b1[j];
+            a1[j] = relu(z1[j]);
+        }
+
+        // Layer 2
+        double[] z2 = new double[H2];
+        double[] a2 = new double[H2];
+        for (int j = 0; j < H2; j++) {
+            for (int i = 0; i < H1; i++)
+                z2[j] += a1[i] * W2[i][j];
+            z2[j] += b2[j];
+            a2[j] = relu(z2[j]);
+        }
+
+        // Output layer (logits)
+        double[] z3 = new double[OUTPUT];
+        for (int j = 0; j < OUTPUT; j++) {
+            for (int i = 0; i < H2; i++)
+                z3[j] += a2[i] * W3[i][j];
+            z3[j] += b3[j];
+        }
+
+        // Softmax probabilities
+        double[] probs = softmax(z3);
+
+        // -------- Backpropagation --------
+
+        // dL/dz3 (softmax + cross-entropy)
+        double[] dz3 = probs.clone();
+        dz3[label] -= 1.0;
+
+        // Gradients for W3 and b3
+        double[][] dW3 = new double[H2][OUTPUT];
+        double[] db3 = dz3.clone();
+        for (int i = 0; i < H2; i++)
+            for (int j = 0; j < OUTPUT; j++)
+                dW3[i][j] = a2[i] * dz3[j];
+
+        // Backprop into layer 2
+        double[] da2 = new double[H2];
+        for (int i = 0; i < H2; i++)
+            for (int j = 0; j < OUTPUT; j++)
+                da2[i] += W3[i][j] * dz3[j];
+
+        double[] dz2 = new double[H2];
+        for (int i = 0; i < H2; i++)
+            dz2[i] = da2[i] * reluGrad(z2[i]);
+
+        // Gradients for W2 and b2
+        double[][] dW2 = new double[H1][H2];
+        double[] db2 = dz2.clone();
+        for (int i = 0; i < H1; i++)
+            for (int j = 0; j < H2; j++)
+                dW2[i][j] = a1[i] * dz2[j];
+
+        // Backprop into layer 1
+        double[] da1 = new double[H1];
+        for (int i = 0; i < H1; i++)
+            for (int j = 0; j < H2; j++)
+                da1[i] += W2[i][j] * dz2[j];
+
+        double[] dz1 = new double[H1];
+        for (int i = 0; i < H1; i++)
+            dz1[i] = da1[i] * reluGrad(z1[i]);
+
+        // Gradients for W1 and b1
+        double[][] dW1 = new double[INPUT][H1];
+        double[] db1 = dz1.clone();
+        for (int i = 0; i < INPUT; i++)
+            for (int j = 0; j < H1; j++)
+                dW1[i][j] = x[i] * dz1[j];
+
+        // -------- Parameter update --------
+
+        for (int i = 0; i < INPUT; i++)
+            for (int j = 0; j < H1; j++)
+                W1[i][j] -= lr * dW1[i][j];
+        for (int i = 0; i < H1; i++)
+            b1[i] -= lr * db1[i];
+
+        for (int i = 0; i < H1; i++)
+            for (int j = 0; j < H2; j++)
+                W2[i][j] -= lr * dW2[i][j];
+        for (int i = 0; i < H2; i++)
+            b2[i] -= lr * db2[i];
+
+        for (int i = 0; i < H2; i++)
+            for (int j = 0; j < OUTPUT; j++)
+                W3[i][j] -= lr * dW3[i][j];
+        for (int i = 0; i < OUTPUT; i++)
+            b3[i] -= lr * db3[i];
+    }
+*/
+
+
+#version 430
+
+// WARNING: Never increase the local_size for a particular dimension
+// more than 64 (or maybe 128?). This can choke the GPU!!
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer Image {
+    float images[]; // [nImages][28][28]
+};
+
+layout(std430, binding = 1) readonly buffer W1 {
+    float w1[]; // [nNeurons (16*16)][28*28]
+};
+layout(std430, binding = 2) readonly buffer W2 {
+    float w2[]; // [nNeurons (8*8)][16*16]
+};
+layout(std430, binding = 3) readonly buffer W3 {
+    float w3[]; // [nNeurons (10*10)][8*8]
+};
+
+layout(std430, binding = 4) buffer H1 {
+    float h1[];
+};
+layout(std430, binding = 5) buffer H2 {
+    float h2[];
+};
+layout(std430, binding = 6) writeonly buffer Result {
+    float result[];
+};
+
+uniform int stage;
+uniform int batchSize;
+uniform int batchIdx;
+
+const int imageSize = 28 * 28;
+const int h1Size = 16 * 16;
+const int h2Size = 8 * 8;
+const int outSize = 10;
+
+
+float reluGrad(float x) {
+    return x > 0 ? 1.0 : 0.0;
+}
+
+float[] softmax(float[] z) {
+    double max = Double.NEGATIVE_INFINITY;
+    for (double v : z) max = Math.max(max, v);
+
+    double sum = 0;
+    double[] out = new double[z.length];
+    for (int i = 0; i < z.length; i++) {
+        out[i] = Math.exp(z[i] - max);
+        sum += out[i];
+    }
+    for (int i = 0; i < z.length; i++)
+        out[i] /= sum;
+
+    return out;
+}
+
+// Cross-entropy loss (label is class index)
+double crossEntropy(double[] probs, int label) {
+    return -Math.log(probs[label] + 1e-9);
+}
+
+
+float relu(float x) {
+    return max(0.0, x);
+}
+
+void forward1() {
+    uint neuron = gl_GlobalInvocationID.x;
+    uint batchLocal = gl_GlobalInvocationID.y;
+
+    uint imageIdx = batchIdx + batchLocal;
+
+    if (neuron >= (4 * 256)) return;
+    if (batchLocal >= batchSize) return;
+
+    float sum = 0.0;
+
+    uint inBase = imageIdx * imageSize;
+    uint outBase = batchLocal * h1Size;
+
+    for (uint i = 0; i < h1Size; i++) {
+        sum += images[inBase + i] * w1[(neuron * imageSize) + i];
+    }
+
+    h1[outBase + neuron] = relu(sum);
+}
+
+void forward2() {
+    uint neuron = gl_GlobalInvocationID.x;
+    uint batchLocal = gl_GlobalInvocationID.y;
+
+    if (neuron >= (1 * 256)) return;
+    if (batchLocal >= batchSize) return;
+
+    uint h1Base = batchLocal * h1Size;
+    uint h2Base = batchLocal * h2Size;
+
+    float sum = 0.0;
+    for (uint i = 0; i < h2Size; i++) {
+        sum += h1[h1Base + i] * w2[(neuron * h1Size) + i];
+    }
+
+    h2[h2Base + neuron] = relu(sum);
+}
+
+void forward3() {
+    uint neuron = gl_GlobalInvocationID.x;
+    uint batchLocal = gl_GlobalInvocationID.y;
+
+    if (neuron >= 10) return;
+    if (batchLocal >= batchSize) return;
+
+    uint h2Base = batchLocal * h2Size;
+    uint outBase = batchLocal * outSize;
+
+    float sum = 0.0;
+    for (uint i = 0; i < outSize; i++) {
+        sum += h2[h2Base + i] * w3[(neuron * h2Size) + i];
+    }
+
+    result[outBase + neuron] = relu(sum);
+}
+
+void main() {
+    if (stage == 0) forward1();
+    else if (stage == 1) forward2();
+    else if (stage == 2) forward3();
+}
