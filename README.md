@@ -9,5 +9,5 @@ The goal of this simulation is to demonstrate an almost 100% GPU usage:
 Started out this project with Java, then moved to Go. \
 The low level libraries are too slow and painful to compile in windows, I think I regret switching to Go.
 
-Here are few screenshots:
-
+Here is a screenshot:
+![visualnet.png](visualnet.png)
